@@ -1,0 +1,287 @@
+<?php
+
+/**
+ * @file
+ * Default file for Forms to email.
+ */
+
+/**
+ * Implements hook_menu().
+ */
+function forms_to_email_menu() {
+  $items = array();
+
+  $items['admin/config/forms-to-email'] = array(
+    'title' => 'Forms to E-mail',
+    'page callback' => 'system_admin_menu_block_page',
+    'access arguments' => array('administer site configuration'),
+    'description' => 'Settings for Forms to Email.',
+    'page arguments' => array('forms_to_email_settings_form'),
+    'weight' => -10,
+  );
+
+  $items['admin/config/forms-to-email/settings'] = array(
+    'title' => 'Settings',
+    'description' => 'General settings for Forms to Email',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('forms_to_email_settings_form'),
+    'access arguments' => array('administer site configuration'),
+    'type' => MENU_NORMAL_ITEM,
+    'weight' => -10,
+  );
+
+  return $items;
+}
+
+/**
+ * Settings form for Forms to email.
+ */
+function forms_to_email_settings_form() {
+  $form = array();
+
+  $form['forms_to_email_general'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('General settings'),
+  );
+
+  $form['forms_to_email_general']['forms_to_email_form_id'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Form ID'),
+    '#default_value' => variable_get('forms_to_email_form_id'),
+    '#description' => t('Form to be alter'),
+    '#required' => TRUE,
+  );
+
+  $form['forms_to_email_general']['forms_to_email_from'] = array(
+    '#type' => 'textfield',
+    '#title' => t('From'),
+    '#default_value' => variable_get('forms_to_email_from'),
+    '#required' => TRUE,
+  );
+
+  $form['forms_to_email_general']['forms_to_email_to'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Email to'),
+    '#default_value' => variable_get('forms_to_email_to'),
+    '#required' => FALSE,
+  );
+
+  $form['forms_to_email_general']['forms_to_email_subject'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Subject'),
+    '#default_value' => variable_get('forms_to_email_subject'),
+    '#required' => TRUE,
+  );
+
+  $form['forms_to_email_general']['forms_to_email_default_redirect_success'] = array(
+    '#type' => 'textarea',
+    '#title' => t('Redirect in success'),
+    '#default_value' => variable_get('forms_to_email_default_redirect_success'),
+    '#required' => FALSE,
+    '#description' => t('Redirect for success. Use one per line with key|value format. E.g. form_id|thank-you'),
+  );
+
+  $disable_other_submits = 'yes';
+
+  if (!empty(variable_get('forms_to_email_disable_other_submits'))) {
+    $disable_other_submits = variable_get('forms_to_email_disable_other_submits');
+  }
+
+  $form['forms_to_email_general']['forms_to_email_disable_other_submits'] = array(
+    '#type' => 'select',
+    '#title' => t('Disable other submits'),
+    '#options' => [
+      'yes' => t('Yes'),
+      'no' => t('No'),
+    ],
+    '#default_value' => $disable_other_submits,
+  );
+
+  $form['forms_to_email_general']['forms_to_email_fields_to_ignore'] = array(
+    '#type' => 'textarea',
+    '#title' => t('Fields to Ignore'),
+    '#default_value' => variable_get('forms_to_email_fields_to_ignore'),
+    '#required' => FALSE,
+  );
+
+  return system_settings_form($form);
+}
+
+/**
+ * Implements hook_form_ID_alter().
+ */
+function forms_to_email_form_alter(&$form, $form_state, $form_id) {
+
+  $forms_to_alter = variable_get('forms_to_email_form_id');
+  $forms_to_alter = explode(',', $forms_to_alter);
+
+  if (!in_array($form_id, $forms_to_alter)) {
+    return FALSE;
+  }
+
+  // Check if need disable other submits..
+  $disable_other_submits = variable_get('forms_to_email_disable_other_submits', 'yes');
+
+  if ($disable_other_submits == 'yes') {
+    unset($form['#submit']);
+  }
+
+  $form['#submit'][] = 'forms_to_email_form_submit';
+}
+
+/**
+ * Form Submit.
+ */
+function forms_to_email_form_submit($form, &$form_state) {
+
+  $data = forms_to_email_get_data($form, $form_state);
+
+  drupal_alter('mail_data', $data, $form, $form_state);
+
+  $mail_sended = forms_to_email_send_form_to_email($data);
+
+  if (empty($mail_sended)) {
+    $error_message = $data['error_message'];
+    watchdog('forms_to_email', $error_message);
+  }
+
+  if (!empty($data['redirect'])) {
+    drupal_goto($data['redirect']);
+  }
+}
+
+/**
+ * Function to get data to email.
+ */
+function forms_to_email_get_data($form, $form_state) {
+
+  $data = array();
+
+  $form_id = $form['#form_id'];
+  $from = variable_get('forms_to_email_from');
+  $to = variable_get('forms_to_email_to');
+  $subject = variable_get('forms_to_email_subject');
+  $redirects = variable_get('forms_to_email_default_redirect_success');
+  $error_message = t('An error occurred while sending your email. Please try again later.');
+
+  $values = $form_state['values'];
+
+  forms_to_email_remove_password_fields($values, $form);
+
+  $data_values = module_invoke_all('set_values', $form, $form_state);
+
+  if (empty($data_values)) {
+
+    foreach ($values as $key => $value) {
+
+      if (is_array($value)) {
+        $value = implode(", ", $value);
+      }
+
+      $data_values[$key] = $value;
+    }
+  }
+
+  $redirects = explode(PHP_EOL, $redirects);
+  foreach ($redirects as $redirect) {
+
+    $redirect = explode('|', $redirect);
+    $id = $redirect[0];
+
+    if ($id == $form_id) {
+      $data['redirect'] = trim($redirect[1]);
+      break;
+    }
+  }
+
+  $data['values'] = $data_values;
+  $data['from'] = $from;
+  $data['to'] = $to;
+  $data['subject'] = $subject;
+  $data['error_message'] = $error_message;
+  $data['label'] = t('Informations:');
+
+  return $data;
+}
+
+/**
+ * Function to Remove Password Fields.
+ */
+function forms_to_email_remove_password_fields(&$values, $form) {
+
+    if (empty($values)) {
+      return FALSE;
+    }
+
+    foreach ($values as $key => $value) {
+
+      $key = trim($key);
+
+      if ($key == 'pass') {
+        $values[$key] = '****';
+        continue;
+      }
+
+      if (empty($form[$key]['#type'])) {
+        continue;
+      }
+
+      $type = $form[$key]['#type'];
+
+      if ($type == 'password') {
+        $values[$key] = '****';
+      }
+    }
+
+}
+
+/**
+ * Function to send form to email.
+ */
+function forms_to_email_send_form_to_email($data) {
+
+  if (empty($data)) {
+    return FALSE;
+  }
+
+  $from = $data['from'];
+  $to = $data['to'];
+  $subject = $data['subject'];
+  $label = $data['label'];
+  $values = $data['values'];
+  $headers = FALSE;
+
+  $body = $label;
+
+  $fields_to_ignore = variable_get('forms_to_email_fields_to_ignore');
+  $fields_to_ignore = explode(PHP_EOL, $fields_to_ignore);
+
+  foreach ($fields_to_ignore as $field_to_ignore) {
+
+    $field_to_ignore = trim($field_to_ignore);
+
+    if (!empty($values[$field_to_ignore])) {
+      unset($values[$field_to_ignore]);
+    }
+  }
+
+  foreach ($values as $label => $value) {
+
+    // Strip tags.
+    $label = strip_tags($label);
+    $value = strip_tags($value);
+
+    // Clear special chars.
+    $label = preg_replace("/[^ \w]+/", "", $label);
+
+    $body .= PHP_EOL . '__________________________________________' . PHP_EOL . $label . ': ' . $value;
+  }
+
+  if (!empty($from)) {
+    $headers = 'From: ' . $from . PHP_EOL .
+      'Reply-To: ' . $from . PHP_EOL .
+      'X-Mailer: PHP/' . phpversion();
+  }
+
+  return mail($to, $subject, $body, $headers);
+}

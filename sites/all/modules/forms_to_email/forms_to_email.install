@@ -1,0 +1,16 @@
+<?php
+
+/**
+ * @file
+ * Install, update and uninstall functions for the Forms to Email.
+ */
+
+/**
+ * Implements hook_uninstall().
+ */
+function forms_to_email_uninstall() {
+  // Remove all variables from variable table.
+  db_delete('variable')
+    ->condition('name', 'forms_to_email_%', 'like')
+    ->execute();
+}
